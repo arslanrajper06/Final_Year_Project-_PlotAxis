@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PlotAxis — Verify email</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=14" />
+</head>
+<body data-page="verify-otp">
+  <section class="auth-screen">
+    <div class="auth-visual" id="authVisual" aria-hidden="true"></div>
+    <div class="auth-panel">
+      <div class="auth-card">
+        <h2 class="auth-title">Verify your email</h2>
+        <p class="panel-sub" id="otpSubtitle">We sent a 6-digit code to your email.</p>
+        <form id="otpForm" class="auth-form" autocomplete="off">
+          <label>Enter 6-Digit OTP
+            <input type="text" id="otpInput" maxlength="6" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" style="letter-spacing: 0.3em; font-size: 1.2rem; text-align: center;" required />
+          </label>
+          <p class="form-hint form-error" id="otpError" role="alert"></p>
+          <button type="submit" class="btn btn-primary btn-block" id="otpSubmitBtn">Verify &amp; Proceed</button>
+        </form>
+        <div class="auth-actions">
+          <button type="button" class="link-btn" id="resendOtpBtn">Resend OTP</button>
+          <a class="link-btn" href="register.html">Back to account details</a>
+        </div>
+      </div>
+    </div>
+  </section>
+  <script src="core.js?v=3"></script>
+  <script src="auth-layout.js"></script>
+  <script src="auth.js"></script>
+</body>
+</html>
