@@ -1,18 +1,19 @@
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 const express = require("express");
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
-const path = require("path");
 const crypto = require("crypto");
-const { PLOTS, buildInstallmentPlan } = require("./data");
+const { PLOTS, buildInstallmentPlan } = require("./customer_portal/data");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname, "customer_portal")));
+app.use(express.static(path.join(__dirname, "Admin_portal")));
 
 // 1. MySQL Connection Pool
 const db = mysql.createPool({
@@ -64,7 +65,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-function serializeReservation(row) {
+function serializeReservation(row, receipts = []) {
   let booking;
   try {
     booking = typeof row.booking_data === "string" ? JSON.parse(row.booking_data) : row.booking_data;
@@ -88,15 +89,25 @@ function serializeReservation(row) {
     ? new Date(row.cancel_at).toISOString()
     : null;
 
-  const downPayment = booking.installments.find(item => item.id === "down");
-  if (downPayment) {
-    downPayment.paid = row.status === "payment_verified";
-    if (downPayment.paid && row.payment_verified_at) {
-      downPayment.paidDate = new Date(row.payment_verified_at).toISOString().slice(0, 10);
+  const receiptsByInstallment = new Map(
+    receipts.map(receipt => [String(receipt.installment_id), receipt])
+  );
+  booking.installments.forEach(installment => {
+    const receipt = receiptsByInstallment.get(String(installment.id));
+    const downPaymentPaid = installment.id === "down" && row.status === "payment_verified";
+    installment.paid = downPaymentPaid || Boolean(receipt);
+    if (receipt) {
+      installment.transactionId = receipt.transaction_id;
+      installment.paidDate = new Date(receipt.paymentDate).toISOString().slice(0, 10);
     } else {
-      delete downPayment.paidDate;
+      delete installment.transactionId;
+      if (downPaymentPaid && row.payment_verified_at) {
+        installment.paidDate = new Date(row.payment_verified_at).toISOString().slice(0, 10);
+      } else {
+        delete installment.paidDate;
+      }
     }
-  }
+  });
   return booking;
 }
 
@@ -105,7 +116,23 @@ async function getCustomerReservations(userId) {
     "SELECT * FROM plot_reservations WHERE user_id = ? ORDER BY reserved_at DESC",
     [userId]
   );
-  return rows.map(serializeReservation);
+  if (!rows.length) return [];
+
+  const bookingIds = rows.map(row => row.booking_id);
+  const [receipts] = await db.query(
+    `SELECT ir.booking_id, ir.installment_id, ir.transaction_id,
+            ir.payment_date AS paymentDate
+     FROM installment_receipts ir
+     WHERE ir.status = 'Paid' AND ir.booking_id IN (${bookingIds.map(() => "?").join(", ")})`,
+    bookingIds
+  );
+  const receiptsByBooking = new Map();
+  receipts.forEach(receipt => {
+    const bookingReceipts = receiptsByBooking.get(receipt.booking_id) || [];
+    bookingReceipts.push(receipt);
+    receiptsByBooking.set(receipt.booking_id, bookingReceipts);
+  });
+  return rows.map(row => serializeReservation(row, receiptsByBooking.get(row.booking_id) || []));
 }
 
 function escapeEmailHtml(value) {
@@ -704,13 +731,34 @@ app.get("/api/admin/reservations", requireAdmin, async (req, res) => {
       `SELECT r.booking_id AS bookingId, r.plot_id AS plotId, r.status,
               r.reserved_at AS reservedAt, r.expires_at AS expiresAt,
               r.extension_used AS extensionUsed, r.payment_verified_at AS paymentVerifiedAt,
-              u.full_name AS customerName, u.email AS customerEmail
+              r.booking_data AS bookingData, u.full_name AS customerName,
+              u.email AS customerEmail
        FROM plot_reservations r
        JOIN users u ON u.id = r.user_id
        WHERE r.status = 'pending'
        ORDER BY r.reserved_at`
     );
-    res.json({ reservations: rows });
+    const reservations = rows.map(row => {
+      let bookingData = row.bookingData;
+      if (typeof bookingData === "string") bookingData = JSON.parse(bookingData);
+      const downPayment = bookingData && Array.isArray(bookingData.installments)
+        ? bookingData.installments.find(item => item.id === "down")
+        : null;
+      if (!downPayment || !Number.isFinite(Number(downPayment.amount))) {
+        throw new Error(`Missing down-payment details for reservation ${row.bookingId}.`);
+      }
+      return {
+        bookingId: row.bookingId,
+        plotId: row.plotId,
+        status: row.status,
+        reservedAt: row.reservedAt,
+        expiresAt: row.expiresAt,
+        customerName: row.customerName,
+        customerEmail: row.customerEmail,
+        downPaymentAmount: Number(downPayment.amount),
+      };
+    });
+    res.json({ reservations });
   } catch (error) {
     console.error("Could not load admin reservations:", error);
     res.status(500).json({ message: "Could not load reservations." });
@@ -718,21 +766,128 @@ app.get("/api/admin/reservations", requireAdmin, async (req, res) => {
 });
 
 app.post("/api/admin/reservations/:bookingId/payment-verified", requireAdmin, async (req, res) => {
+  let connection;
   try {
-    const [result] = await db.query(
-      `UPDATE plot_reservations
-       SET status = 'payment_verified', payment_verified_at = UTC_TIMESTAMP(3)
-       WHERE booking_id = ? AND status = 'pending'
-         AND expires_at > UTC_TIMESTAMP(3) AND cancel_at IS NULL`,
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+    const [rows] = await connection.query(
+      `SELECT r.booking_id, r.booking_data, u.email AS customerEmail
+       FROM plot_reservations r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.booking_id = ? AND r.status = 'pending'
+         AND r.expires_at > UTC_TIMESTAMP(3) AND r.cancel_at IS NULL
+       FOR UPDATE`,
       [req.params.bookingId]
     );
-    if (!result.affectedRows) {
+    if (!rows.length) {
+      await connection.rollback();
       return res.status(409).json({ message: "Reservation is not pending, has expired, or has a cancellation request." });
     }
-    res.json({ message: "Payment verified. The reservation will no longer expire automatically." });
+
+    let bookingData = rows[0].booking_data;
+    if (typeof bookingData === "string") bookingData = JSON.parse(bookingData);
+    if (!bookingData || !Array.isArray(bookingData.installments)) {
+      throw new Error(`Invalid stored booking data for ${req.params.bookingId}.`);
+    }
+    const downPayment = bookingData.installments.find(item => item.id === "down");
+    if (!downPayment || !Number.isFinite(Number(downPayment.amount)) || Number(downPayment.amount) <= 0) {
+      throw new Error(`Missing valid down payment for ${req.params.bookingId}.`);
+    }
+
+    const transactionId = crypto.randomUUID();
+    await connection.query(
+      `UPDATE plot_reservations
+       SET status = 'payment_verified', payment_verified_at = UTC_TIMESTAMP(3)
+       WHERE booking_id = ?`,
+      [req.params.bookingId]
+    );
+    await connection.query(
+      `INSERT INTO installment_receipts
+         (transaction_id, booking_id, customer_email, installment_id, amount_paid, payment_date, status)
+       VALUES (?, ?, ?, 'down', ?, UTC_TIMESTAMP(3), 'Paid')`,
+      [transactionId, req.params.bookingId, rows[0].customerEmail, Number(downPayment.amount)]
+    );
+    await connection.commit();
+    res.json({
+      message: "Payment verified. The reservation will no longer expire automatically.",
+      transactionId,
+    });
   } catch (error) {
+    if (connection) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Could not roll back verified payment:", rollbackError);
+      }
+    }
     console.error("Could not verify reservation payment:", error);
     res.status(500).json({ message: "Could not verify payment." });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.post("/api/admin/reservations/:bookingId/installments/:installmentId/payment-verified", requireAdmin, async (req, res) => {
+  const { bookingId, installmentId } = req.params;
+  if (!/^[a-z0-9-]{1,20}$/i.test(installmentId)) {
+    return res.status(400).json({ message: "Invalid installment ID." });
+  }
+
+  let connection;
+  try {
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+    const [rows] = await connection.query(
+      `SELECT r.booking_id, r.booking_data, u.email AS customerEmail
+       FROM plot_reservations r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.booking_id = ? AND r.status = 'payment_verified'
+       FOR UPDATE`,
+      [bookingId]
+    );
+    if (!rows.length) {
+      await connection.rollback();
+      return res.status(409).json({ message: "Reservation must have a verified down payment before later installments can be recorded." });
+    }
+
+    let bookingData = rows[0].booking_data;
+    if (typeof bookingData === "string") bookingData = JSON.parse(bookingData);
+    if (!bookingData || !Array.isArray(bookingData.installments)) {
+      throw new Error(`Invalid stored booking data for ${bookingId}.`);
+    }
+    const installment = bookingData.installments.find(item => String(item.id) === installmentId);
+    if (!installment || !Number.isFinite(Number(installment.amount)) || Number(installment.amount) <= 0) {
+      await connection.rollback();
+      return res.status(404).json({ message: "Installment not found." });
+    }
+
+    const transactionId = crypto.randomUUID();
+    await connection.query(
+      `INSERT INTO installment_receipts
+         (transaction_id, booking_id, customer_email, installment_id, amount_paid, payment_date, status)
+       VALUES (?, ?, ?, ?, ?, UTC_TIMESTAMP(3), 'Paid')`,
+      [transactionId, bookingId, rows[0].customerEmail, installmentId, Number(installment.amount)]
+    );
+    await connection.commit();
+    res.json({
+      message: "Installment payment verified.",
+      transactionId,
+    });
+  } catch (error) {
+    if (connection) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Could not roll back verified installment payment:", rollbackError);
+      }
+    }
+    if (error.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({ message: "This installment already has a paid receipt." });
+    }
+    console.error(`Could not verify installment ${installmentId} for ${bookingId}:`, error);
+    res.status(500).json({ message: "Could not verify installment payment." });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -1034,6 +1189,61 @@ app.get("/api/admin/certificates/:id/views", requireAdmin, async (req, res) => {
   }
 });
 
+async function ensureReceiptCustomerEmailColumn() {
+  const [columns] = await db.query("SHOW COLUMNS FROM installment_receipts LIKE 'customer_email'");
+  const columnIsNullable = !columns.length || columns[0].Null === "YES";
+  if (!columns.length) {
+    await db.query(
+      "ALTER TABLE installment_receipts ADD COLUMN customer_email VARCHAR(150) NULL AFTER booking_id"
+    );
+  }
+  await db.query(
+    `UPDATE installment_receipts ir
+     JOIN plot_reservations r ON r.booking_id = ir.booking_id
+     JOIN users u ON u.id = r.user_id
+     SET ir.customer_email = u.email
+     WHERE ir.customer_email IS NULL OR ir.customer_email = ''`
+  );
+  const [missingEmails] = await db.query(
+    "SELECT id FROM installment_receipts WHERE customer_email IS NULL OR customer_email = '' LIMIT 1"
+  );
+  if (missingEmails.length) {
+    throw new Error("Could not backfill customer email for existing installment receipts.");
+  }
+  if (columnIsNullable) {
+    await db.query(
+      "ALTER TABLE installment_receipts MODIFY customer_email VARCHAR(150) NOT NULL"
+    );
+  }
+}
+
+async function backfillInstallmentReceipts() {
+  const [rows] = await db.query(
+    `SELECT r.booking_id, r.booking_data, r.payment_verified_at, u.email AS customerEmail
+     FROM plot_reservations r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN installment_receipts ir
+       ON ir.booking_id = r.booking_id AND ir.installment_id = 'down'
+     WHERE r.status = 'payment_verified' AND ir.id IS NULL`
+  );
+  for (const row of rows) {
+    let bookingData = row.booking_data;
+    if (typeof bookingData === "string") bookingData = JSON.parse(bookingData);
+    const downPayment = bookingData && Array.isArray(bookingData.installments)
+      ? bookingData.installments.find(item => item.id === "down")
+      : null;
+    if (!downPayment || !Number.isFinite(Number(downPayment.amount)) || Number(downPayment.amount) <= 0) {
+      throw new Error(`Cannot create a receipt for invalid paid reservation ${row.booking_id}.`);
+    }
+    await db.query(
+      `INSERT INTO installment_receipts
+         (transaction_id, booking_id, customer_email, installment_id, amount_paid, payment_date, status)
+       VALUES (?, ?, ?, 'down', ?, COALESCE(?, UTC_TIMESTAMP(3)), 'Paid')`,
+      [crypto.randomUUID(), row.booking_id, row.customerEmail, Number(downPayment.amount), row.payment_verified_at]
+    );
+  }
+}
+
 const PORT = process.env.PORT || 5000;
 async function startServer() {
   await db.query(
@@ -1060,6 +1270,23 @@ async function startServer() {
       CONSTRAINT fk_plot_reservations_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )`
   );
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS installment_receipts (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      transaction_id CHAR(36) NOT NULL UNIQUE,
+      booking_id VARCHAR(100) NOT NULL,
+      customer_email VARCHAR(150) NOT NULL,
+      installment_id VARCHAR(20) NOT NULL,
+      amount_paid DECIMAL(12, 2) NOT NULL,
+      payment_date DATETIME(3) NOT NULL,
+      status ENUM('Paid', 'Void') NOT NULL DEFAULT 'Paid',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_installment_receipt_booking_installment (booking_id, installment_id),
+      CONSTRAINT fk_installment_receipts_reservation FOREIGN KEY (booking_id) REFERENCES plot_reservations(booking_id) ON DELETE CASCADE
+    )`
+  );
+  await ensureReceiptCustomerEmailColumn();
+  await backfillInstallmentReceipts();
   await db.query(
     `CREATE TABLE IF NOT EXISTS certificate_documents (
       id INT AUTO_INCREMENT PRIMARY KEY,

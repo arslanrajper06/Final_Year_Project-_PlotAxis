@@ -1,6 +1,6 @@
 (() => {
   const STORAGE_KEY = "plotaxis_customer_session";
-  const API_BASE = "http://localhost:5000/api/auth";
+  const API_BASE = `${window.location.origin}/api/auth`;
   const API_ROOT = API_BASE.replace(/\/auth$/, "");
 
 function loadState() {

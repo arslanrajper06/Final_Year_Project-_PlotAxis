@@ -1038,6 +1038,9 @@ function renderPayments() {
           <p>Next: ${next.label} · ${formatPKR(next.amount)} · Due ${next.dueDate}</p>
         </div>
       ` : `<div class="next-due-note"><p>All payments have been completed.</p></div>`}
+      <div class="payments-refresh-row">
+        <button type="button" class="btn btn-ghost btn-small" id="refreshPaymentsBtn">Refresh payment status</button>
+      </div>
     </div>
 
     <table class="pay-table">
@@ -1059,7 +1062,9 @@ function renderPayments() {
             <td>${inst.paid ? "Paid" : "Pending"}</td>
             <td>
               ${inst.paid
-                ? `<button type="button" class="btn btn-ghost btn-small" data-receipt="${booking.bookingId}|${inst.id}">View receipt</button>`
+                ? (inst.transactionId
+                  ? `<button type="button" class="btn btn-ghost btn-small" data-receipt="${booking.bookingId}|${inst.id}">View receipt</button>`
+                  : `<span class="panel-sub">Receipt unavailable</span>`)
                 : `<span class="panel-sub">Available when paid</span>`}
             </td>
           </tr>
@@ -1067,6 +1072,20 @@ function renderPayments() {
       </tbody>
     </table>
   `;
+
+  wrap.querySelector("#refreshPaymentsBtn").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await syncReservationState();
+      renderPayments();
+      toast("Payment status refreshed.");
+    } catch (error) {
+      console.error("Could not refresh payment status.", error);
+      toast("Could not refresh payment status. Check your connection and try again.");
+      button.disabled = false;
+    }
+  });
 
   wrap.querySelectorAll("[data-payment-booking]").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -1184,7 +1203,7 @@ window.openInstallmentReceipt = function (bookingId, instId) {
     toast("Receipt details could not be loaded.");
     return;
   }
-  if (!inst.paid) {
+  if (!inst.paid || !inst.transactionId) {
     toast("A receipt is available after the payment is confirmed.");
     return;
   }
@@ -1194,7 +1213,7 @@ window.openInstallmentReceipt = function (bookingId, instId) {
 
   const customerName = state.user?.name || "Customer";
   const customerEmail = state.user?.email || "";
-  const tid = `PA-${plot.id.replace(/[^A-Z0-9]/gi, "")}-${String(inst.id).toUpperCase()}-${booking.bookedOn.replace(/-/g, "")}-${String(booking.bookingId).replace(/[^A-Z0-9]/gi, "").slice(-8).toUpperCase()}`;
+  const tid = inst.transactionId;
   const paidDate = inst.paidDate || inst.dueDate;
 
   const overlay = document.createElement("div");
@@ -1219,27 +1238,27 @@ window.openInstallmentReceipt = function (bookingId, instId) {
 
         <div style="border-top: 1.5px dashed #D7DCEB; margin: 0 18px;"></div>
 
-        <div style="padding: 14px 20px 16px; font-size: 13px; color: #12173F;">
+        <div class="receipt-details-area">
           <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #F1F3FA;">
             <span style="color: #5D6480;">Paid By</span>
-            <span style="font-weight: 600;">${customerName}</span>
+            <span style="font-weight: 600;">${escapeHtml(customerName)}</span>
           </div>
           ${customerEmail ? `
           <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #F1F3FA;">
             <span style="color: #5D6480;">Email</span>
-            <span style="font-weight: 500;">${customerEmail}</span>
+            <span style="font-weight: 500;">${escapeHtml(customerEmail)}</span>
           </div>` : ""}
           <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #F1F3FA;">
             <span style="color: #5D6480;">Plot & Society</span>
-            <span style="font-weight: 600;">${plot.id} · ${plot.society} (Block ${plot.block})</span>
+            <span style="font-weight: 600;">${escapeHtml(`${plot.id} · ${plot.society} (Block ${plot.block})`)}</span>
           </div>
           <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #F1F3FA;">
             <span style="color: #5D6480;">Installment</span>
-            <span style="font-weight: 600;">${inst.label}</span>
+            <span style="font-weight: 600;">${escapeHtml(inst.label)}</span>
           </div>
           <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #F1F3FA;">
             <span style="color: #5D6480;">Payment Date</span>
-            <span style="font-weight: 600;">${paidDate}</span>
+            <span style="font-weight: 600;">${escapeHtml(paidDate)}</span>
           </div>
           <div style="display: flex; justify-content: space-between; padding: 6px 0;">
             <span style="color: #5D6480;">Payment Channel</span>
@@ -1248,8 +1267,9 @@ window.openInstallmentReceipt = function (bookingId, instId) {
         </div>
       </div>
 
-      <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px;">
+      <div style="display: flex; gap: 10px; justify-content: center; margin-top: 14px; flex-wrap:wrap;">
         <button type="button" class="btn btn-ghost" onclick="document.getElementById('paReceiptOverlay').remove()">Close</button>
+        <button type="button" class="btn btn-ghost" id="printReceiptBtn">Print</button>
         <button type="button" class="btn btn-primary" id="downloadReceiptBtn">Download Receipt (PNG)</button>
       </div>
     </div>
@@ -1261,30 +1281,48 @@ window.openInstallmentReceipt = function (bookingId, instId) {
     if (e.target === overlay) overlay.remove();
   });
 
-  document.getElementById("downloadReceiptBtn").onclick = () => {
-    downloadReceiptImage({
-      tid,
-      customerName,
-      customerEmail,
-      plotLabel: `${plot.id} · ${plot.society} (Block ${plot.block})`,
-      installmentLabel: inst.label,
-      amount: formatPKR(inst.amount),
-      paidDate,
-    });
+  document.getElementById("downloadReceiptBtn").onclick = async () => {
+    try {
+      await downloadReceiptImage({
+        customerName,
+        customerEmail,
+        plotLabel: `${plot.id} · ${plot.society} (Block ${plot.block})`,
+        installmentLabel: inst.label,
+        amount: formatPKR(inst.amount),
+        paidDate,
+        transactionId: tid,
+      });
+    } catch (error) {
+      console.error(`Could not download receipt ${tid}:`, error);
+      toast(error.message || "Receipt could not be downloaded.");
+    }
+  };
+
+  document.getElementById("printReceiptBtn").onclick = async () => {
+    try {
+      document.body.classList.add("printing-receipt");
+      window.print();
+    } catch (error) {
+      console.error(`Could not print receipt ${tid}:`, error);
+      toast(error.message || "Receipt could not be printed.");
+    } finally {
+      document.body.classList.remove("printing-receipt");
+    }
   };
 };
 
 function downloadReceiptImage(info) {
   const canvas = document.createElement("canvas");
   canvas.width = 720;
-  canvas.height = 920;
+  canvas.height = 900;
   const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Receipt image could not be created in this browser.");
 
   ctx.fillStyle = "#F4F6FC";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   ctx.fillStyle = "#FFFFFF";
-  ctx.fillRect(40, 40, 640, 840);
+  ctx.fillRect(40, 40, 640, 820);
 
   ctx.fillStyle = "#1E2761";
   ctx.fillRect(40, 40, 640, 190);
@@ -1302,7 +1340,7 @@ function downloadReceiptImage(info) {
 
   ctx.fillStyle = "#C9D2F5";
   ctx.font = "16px sans-serif";
-  ctx.fillText(`TID: ${info.tid}`, 360, 175);
+  ctx.fillText(`TID: ${info.transactionId}`, 360, 175);
 
   ctx.fillStyle = "#15803D";
   ctx.beginPath();
@@ -1346,7 +1384,7 @@ function downloadReceiptImage(info) {
     ["Installment", info.installmentLabel],
     ["Payment Date", info.paidDate],
     ["Payment Channel", "Society Office Verified"],
-    ["Status", "Confirmed"],
+    ["Transaction ID", info.transactionId],
   ];
 
   let y = 495;
@@ -1359,7 +1397,7 @@ function downloadReceiptImage(info) {
     ctx.textAlign = "right";
     ctx.fillStyle = "#12173F";
     ctx.font = "bold 18px sans-serif";
-    ctx.fillText(String(v), 635, y);
+    ctx.fillText(String(v), 635, y, 480);
 
     ctx.strokeStyle = "#F1F3FA";
     ctx.lineWidth = 1.5;
@@ -1368,16 +1406,16 @@ function downloadReceiptImage(info) {
     ctx.lineTo(635, y + 18);
     ctx.stroke();
 
-    y += 52;
+    y += 46;
   });
 
   ctx.textAlign = "center";
-  ctx.fillStyle = "#8C93AD";
+  ctx.fillStyle = "#5D6480";
   ctx.font = "14px sans-serif";
-  ctx.fillText("Generated digitally by PlotAxis Housing Society Management System", 360, 855);
+  ctx.fillText("Keep this receipt for your records.", 360, 835);
 
   const link = document.createElement("a");
-  link.download = `${info.tid}.png`;
+  link.download = `PlotAxis-Receipt-${info.transactionId}.png`;
   link.href = canvas.toDataURL("image/png");
   document.body.appendChild(link);
   link.click();

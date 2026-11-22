@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <title>PlotAxis — Admin payment verification</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css?v=19" />
+</head>
+<body>
+  <main class="admin-shell">
+    <a class="brand admin-brand" href="/" aria-label="PlotAxis home">
+      <span class="brand-mark"><span></span><span></span><span></span><span></span></span>
+      <span class="brand-copy">
+        <span class="brand-name">PlotAxis</span>
+        <span class="brand-tagline">ADMINISTRATION</span>
+      </span>
+    </a>
+    <nav class="admin-nav" aria-label="Admin tools">
+      <a href="/admin.html" class="is-active" aria-current="page">Pending payments</a>
+    </nav>
+
+    <header class="admin-heading">
+      <p class="panel-sub">PAYMENT OPERATIONS</p>
+      <h1>Verify payments</h1>
+      <p>Confirm a payment only after it has been received and checked. Customers can then view and download the receipt from their payments page.</p>
+    </header>
+
+    <section class="admin-key-card" id="adminKeyCard" aria-labelledby="adminKeyHeading">
+      <h2 id="adminKeyHeading">Admin access</h2>
+      <form id="adminKeyForm" class="admin-key-form">
+        <label for="adminKey">Admin API key
+          <input id="adminKey" name="adminKey" type="password" autocomplete="off" required />
+        </label>
+        <button class="btn btn-primary" type="submit" id="loadReservationsBtn">Load pending payments</button>
+      </form>
+      <div class="admin-key-actions">
+        <p id="adminStatus" class="admin-status" role="status">Enter the key configured as ADMIN_API_KEY in the backend .env file.</p>
+        <button class="btn btn-ghost btn-small" type="button" id="clearAdminKeyBtn">Clear key</button>
+      </div>
+    </section>
+
+    <section class="admin-queue" id="pendingPaymentsQueue" aria-labelledby="pendingPaymentsHeading">
+      <div class="admin-queue-heading">
+        <div>
+          <p class="panel-sub">RESERVATION QUEUE</p>
+          <h2 id="pendingPaymentsHeading">Pending down payments</h2>
+        </div>
+        <button class="btn btn-ghost btn-small" id="refreshReservationsBtn" type="button" disabled>Refresh</button>
+      </div>
+      <div id="reservationList" class="admin-reservation-list">
+        <p class="admin-empty">Authenticate to load pending reservations.</p>
+      </div>
+    </section>
+
+  </main>
+  <script src="/admin.js?v=5"></script>
+</body>
+</html>

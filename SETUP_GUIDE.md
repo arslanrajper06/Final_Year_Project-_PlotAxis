@@ -1,14 +1,15 @@
-# PlotAxis Customer Portal — Setup Guide (Frontend + Backend + MySQL + Email)
+# PlotAxis — Setup Guide (Admin + Customer Portals, Node.js + MySQL + Email)
 
 ## Folder Contents
-- `index.html` — Customer portal UI (Login, Register, OTP Verification & Dashboard)
-- `styles.css` — Complete styling
-- `app.js` — Customer portal logic and reservation synchronization
-- `data.js` — Plot inventory & recommendation scoring
-- `server.js` — Node.js + Express backend with MySQL & Nodemailer OTP
+- `Admin_portal/admin.html` / `Admin_portal/admin.js` — Admin-only payment portal
+- `customer_portal/` — customer login, OTP, bookings, payments and society documents
+- `customer_portal/styles.css` — shared portal styling
+- `server.js` — Shared Node.js + Express API for both portals
 - `database.sql` — MySQL database & tables script
 - `package.json` — Required Node.js packages
 - `.env` — Database & Gmail SMTP configuration
+
+The project is split into `Admin_portal` and `customer_portal`; the shared API and database configuration stay in the `Final_Year_Project` folder. Express serves customer files first and admin files second, while both use the same `/api` endpoints.
 
 ---
 
@@ -25,15 +26,29 @@
 5. `ADMIN_API_KEY` mein ek strong, private key set karein. Is key se admins payments verify, one-time 24-hour extensions approve, aur Society Verification documents manage karenge. Key missing ho to admin endpoints band rahenge. Isay customers ke saath share na karein.
 
 ## Step 3: Packages Install Karein aur Server Chalayein
-VS Code terminal mein is folder ke andar yeh 2 commands chalayein:
+Repository root se `Final_Year_Project` folder mein ja kar commands chalayein:
 
 ```bash
+cd Final_Year_Project
 npm install
 npm start
 ```
 
 Server start hone par likha aayega:
 `PlotAxis Server running on http://localhost:5000`
+
+## Installment Receipts
+- Admin portal `http://localhost:5000/admin.html` par kholein, `Final_Year_Project/.env` mein configured `ADMIN_API_KEY` enter karein, phir pending down-payments load karein. Payment receive hone ke baad hi us booking par **Confirm payment received** click karein.
+- Admin ke `POST /api/admin/reservations/:bookingId/payment-verified` se down-payment confirm hoti hai; baad ki installments ko `POST /api/admin/reservations/:bookingId/installments/:installmentId/payment-verified` se confirm kiya ja sakta hai. Har confirmation par server transaction ke andar unique UUID receipt ID aur payment amount/date save karta hai.
+- Customer `Installments & payments` page par paid installment ka receipt dekh aur download/print kar sakta hai. Receipt mein payment details aur transaction ID hoti hai.
+- Server startup par `installment_receipts` table ban jati hai aur pehle se admin-verified down-payments ke liye unique receipt IDs backfill hoti hain. `database.sql` mein bhi table ka schema hai.
+
+Baad ki installment ko admin se record karne ke liye `installmentId` booking plan ka ID hota hai, jaise `q-1`:
+
+```bash
+curl -X POST -H "x-admin-key: YOUR_ADMIN_API_KEY" \
+  http://localhost:5000/api/admin/reservations/BOOKING_ID/installments/q-1/payment-verified
+```
 
 ## Step 4: Reservation Expiry
 - Nayi reservation par 72-hour payment deadline database mein save hoti hai.

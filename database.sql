@@ -43,6 +43,20 @@ CREATE TABLE IF NOT EXISTS plot_reservations (
   CONSTRAINT fk_plot_reservations_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS installment_receipts (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  transaction_id CHAR(36) NOT NULL UNIQUE,
+  booking_id VARCHAR(100) NOT NULL,
+  customer_email VARCHAR(150) NOT NULL,
+  installment_id VARCHAR(20) NOT NULL,
+  amount_paid DECIMAL(12, 2) NOT NULL,
+  payment_date DATETIME(3) NOT NULL,
+  status ENUM('Paid', 'Void') NOT NULL DEFAULT 'Paid',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_installment_receipt_booking_installment (booking_id, installment_id),
+  CONSTRAINT fk_installment_receipts_reservation FOREIGN KEY (booking_id) REFERENCES plot_reservations(booking_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS certificate_documents (
   id INT AUTO_INCREMENT PRIMARY KEY,
   society_name VARCHAR(120) NOT NULL,
